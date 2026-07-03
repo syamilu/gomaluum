@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/gocolly/colly/v2"
 	"github.com/nrmnqdds/gomaluum/internal/constants"
@@ -20,6 +21,12 @@ import (
 func isTruthyParam(v string) bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
+
+// scrapeTimeout bounds each i-Ma'luum request. colly defaults to 10s, but the
+// first request through a slow/residential egress proxy establishes a cold
+// tunnel that can exceed 10s. Warm requests still return in ~2s; this only
+// affects the cold-connection case.
+const scrapeTimeout = 30 * time.Second
 
 // detectStale flags the scrape as stale if the fetched page contains a CAS
 // login password field. Authenticated i-Ma'luum data pages never do, so its
@@ -62,6 +69,7 @@ func classifyVisitError(err error) *errors.CustomError {
 func (s *Server) newImaluumCollector(ctx context.Context, cookie string, stale *atomic.Bool) *colly.Collector {
 	c := colly.NewCollector()
 	c.WithTransport(s.httpClient.Transport)
+	c.SetRequestTimeout(scrapeTimeout)
 	detectStale(c, stale)
 	applyImaluumHeaders(c, cookie)
 	s.logUpstreamError(ctx, c)
