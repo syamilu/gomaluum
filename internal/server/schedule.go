@@ -391,13 +391,23 @@ func (s *Server) resolveSchedules(ctx context.Context, username string, queries,
 	// Merge over the authoritative dropdown order: fresh scrape wins, else cache.
 	// Iterating over queries drops cached sessions no longer offered by i-Ma'luum.
 	merged := make([]dtos.ScheduleResponse, 0, len(queries))
+	fromCache := 0
 	for _, q := range queries {
 		if sc, ok := scrapedByQuery[q]; ok {
 			merged = append(merged, sc)
 		} else if c, ok := cachedByQuery[q]; ok {
 			merged = append(merged, c)
+			fromCache++
 		}
 	}
+
+	// Confirms the cached data is actually served: how many sessions came from
+	// GEI vs were freshly scraped this request.
+	s.log.DebugContext(ctx, "served schedule via GEI cache",
+		"username", username,
+		"from_cache", fromCache,
+		"scraped", len(merged)-fromCache,
+		"total", len(merged))
 	return merged, nil
 }
 
