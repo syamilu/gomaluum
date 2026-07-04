@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/bytedance/sonic"
 	"github.com/nrmnqdds/gomaluum/internal/dtos"
@@ -54,11 +55,13 @@ func (i *scheduleIndexer) GetSchedule(ctx context.Context, username string) (sch
 		return nil, false, err
 	}
 	if !resp.GetSuccess() {
+		slog.DebugContext(ctx, "GEI cache miss", "username", username)
 		return nil, false, nil
 	}
 	if err := sonic.ConfigFastest.Unmarshal([]byte(resp.GetScheduleJson()), &schedules); err != nil {
 		return nil, false, fmt.Errorf("decoding cached schedule: %w", err)
 	}
+	slog.DebugContext(ctx, "GEI cache hit", "username", username, "sessions", len(schedules))
 	return schedules, true, nil
 }
 
@@ -70,9 +73,12 @@ func (i *scheduleIndexer) StoreSchedule(ctx context.Context, username string, sc
 		return fmt.Errorf("encoding schedule for cache: %w", err)
 	}
 	ctx = metadata.AppendToOutgoingContext(ctx, "admin-key", i.adminKey)
-	_, err = i.client.StoreSchedule(ctx, &gei.StoreScheduleRequest{
+	if _, err = i.client.StoreSchedule(ctx, &gei.StoreScheduleRequest{
 		Username:     username,
 		ScheduleJson: string(payload),
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	slog.DebugContext(ctx, "stored schedule to GEI", "username", username, "sessions", len(schedules), "bytes", len(payload))
+	return nil
 }
