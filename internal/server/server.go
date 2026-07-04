@@ -189,10 +189,20 @@ func createHTTPClient() (*http.Client, error) {
 		},
 	}
 
+	// Route i-Ma'luum traffic through a URL-rewriting relay (e.g. a Cloudflare
+	// Worker) when configured; IIUM blocks our datacenter IP on /MyAcademic/* but
+	// not the relay's. Only i-Ma'luum requests are rewritten; other hosts stay
+	// direct. otelhttp wraps the relay so spans still show the real i-Ma'luum URL.
+	relayPrefix := os.Getenv("IMALUUM_PROXY_PREFIX")
+	if relayPrefix != "" {
+		log.Println("i-Ma'luum egress: routing through IMALUUM_PROXY_PREFIX relay")
+	}
+	rt := newImaluumRelay(relayPrefix, transport)
+
 	// Wrap the transport with otelhttp so outgoing requests become child spans
 	// and the W3C trace context is injected into request headers.
 	return &http.Client{
-		Transport: otelhttp.NewTransport(transport),
+		Transport: otelhttp.NewTransport(rt),
 		Timeout:   30 * time.Second,
 	}, nil
 }

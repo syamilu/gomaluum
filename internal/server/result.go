@@ -334,7 +334,11 @@ func (s *Server) ResultHandler(w http.ResponseWriter, r *http.Request) {
 
 		c := s.newImaluumCollector(r.Context(), cookie, &stale)
 		c.OnHTML(".box.box-primary .box-header.with-border .dropdown ul.dropdown-menu", func(e *colly.HTMLElement) {
-			sessionQueries = e.ChildAttrs("li[style*='font-size:16px'] a", "href")
+			hrefs := e.ChildAttrs("li[style*='font-size:16px'] a", "href")
+			sessionQueries = make([]string, len(hrefs))
+			for i, href := range hrefs {
+				sessionQueries[i] = sessionQueryFromHref(href)
+			}
 			sessionNames = e.ChildTexts("li[style*='font-size:16px'] a")
 		})
 		if err := c.Visit(constants.ImaluumResultPage); err != nil {

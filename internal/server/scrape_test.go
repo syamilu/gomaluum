@@ -99,6 +99,23 @@ func TestIsTruthyParam(t *testing.T) {
 	}
 }
 
+func TestSessionQueryFromHref(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"relative href", "?ses=2024/2025&sem=1", "?ses=2024/2025&sem=1"},
+		{"absolute i-Ma'luum href", "https://imaluum.iium.edu.my/MyAcademic/schedule?ses=2024/2025&sem=1", "?ses=2024/2025&sem=1"},
+		{"relay-rewritten href", "https://proxy.qaguradev.workers.dev/------https://imaluum.iium.edu.my/MyAcademic/schedule?ses=2024/2025&sem=1", "?ses=2024/2025&sem=1"},
+		{"no query", "https://imaluum.iium.edu.my/MyAcademic/schedule", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, sessionQueryFromHref(tc.in))
+		})
+	}
+}
+
 func TestClassifyVisitError(t *testing.T) {
 	t.Run("403 Forbidden: maps to upstream forbidden (502)", func(t *testing.T) {
 		// colly reports a non-2xx as errors.New(http.StatusText(code)).

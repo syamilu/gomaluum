@@ -22,6 +22,17 @@ func isTruthyParam(v string) bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
+// sessionQueryFromHref extracts the "?ses=...&sem=..." query from a session
+// dropdown link. The link is normally relative ("?ses=..."), but an egress relay
+// can rewrite it into an absolute URL; taking everything from the first "?"
+// yields the query either way. Returns "" when the href carries no query.
+func sessionQueryFromHref(href string) string {
+	if i := strings.IndexByte(href, '?'); i >= 0 {
+		return href[i:]
+	}
+	return ""
+}
+
 // scrapeTimeout bounds each i-Ma'luum request. colly defaults to 10s, but the
 // first request through a slow/residential egress proxy establishes a cold
 // tunnel that can exceed 10s. Warm requests still return in ~2s; this only
