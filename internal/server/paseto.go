@@ -131,7 +131,7 @@ func (s *Server) DecodePasetoToken(ctx context.Context, token, userAPIKey string
 			return nil, err
 		}
 
-		refresh := s.loginFunc(ctx, username, string(decodedPassword))
+		refresh := s.sessionFunc(ctx, username, string(decodedPassword))
 
 		newToken, err := s.tokenManager.GetToken(username, refresh)
 		if err != nil {
@@ -176,42 +176,70 @@ func (s *Server) DecodePasetoToken(ctx context.Context, token, userAPIKey string
 	}, nil
 }
 
-// loginFunc returns a TokenManager refresh closure that logs into i-Ma'luum
-// (via the gRPC auth service) and caches the resulting cookie for
-// imaluumSessionTTL. password must be plaintext.
-func (s *Server) loginFunc(ctx context.Context, username, password string) func() (string, time.Time, error) {
+// login performs the actual i-Ma'luum login via the GAS gRPC auth service and
+// returns the fresh MOD_AUTH_CAS cookie. password must be plaintext.
+func (s *Server) login(ctx context.Context, username, password string) (string, error) {
+	logger := s.log
+	logger.DebugContext(ctx, "Logging in to i-Ma'luum", "username", username)
+
+	if username == constants.DebugUsername && password == constants.DebugPassword {
+		logger.InfoContext(ctx, "Using fake user for debugging (login)")
+		return constants.DebugUserCookie, nil
+	}
+
+	resp, err := s.grpc.client.Login(ctx, &pb.LoginRequest{
+		Username: username,
+		Password: password,
+	})
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to login", "error", err)
+		return "", err
+	}
+	return resp.Token, nil
+}
+
+// sessionFunc returns a TokenManager refresh closure that yields a live
+// MOD_AUTH_CAS cookie for the user. It reuses the cookie persisted in GEI (L2)
+// when present, otherwise logs in and persists the fresh cookie — so a user with
+// a forever-token re-logs-in only on a GEI miss (first login or after a stale
+// eviction), not on every request. The returned expiry only bounds the in-memory
+// L1 (TokenManager) before it re-consults GEI; a hit there does not re-login. GEI
+// failures are non-fatal — we fall back to logging in.
+func (s *Server) sessionFunc(ctx context.Context, username, password string) func() (string, time.Time, error) {
 	return func() (string, time.Time, error) {
-		logger := s.log
-		logger.DebugContext(ctx, "Refreshing session token", "username", username)
+		expiry := time.Now().Add(imaluumSessionTTL)
 
-		var resp *pb.LoginResponse
-		var err error
-
-		if username == constants.DebugUsername && password == constants.DebugPassword {
-			logger.InfoContext(ctx, "Using fake user for debugging (token refresh)")
-			resp = &pb.LoginResponse{
-				Username: constants.DebugUsername,
-				Password: constants.DebugPassword,
-				Token:    constants.DebugUserCookie,
-			}
-		} else {
-			resp, err = s.grpc.client.Login(ctx, &pb.LoginRequest{
-				Username: username,
-				Password: password,
-			})
-			if err != nil {
-				logger.ErrorContext(ctx, "Failed to login", "error", err)
-				return "", time.Now(), err
+		if s.indexer != nil {
+			if cookie, ok, err := s.indexer.GetSession(ctx, username); err != nil {
+				s.log.WarnContext(ctx, "GEI GetSession failed, logging in", "error", err)
+			} else if ok {
+				s.log.DebugContext(ctx, "reusing i-Ma'luum session from GEI (skipped login)", "username", username)
+				return cookie, expiry, nil
 			}
 		}
 
-		return resp.Token, time.Now().Add(imaluumSessionTTL), nil
+		cookie, err := s.login(ctx, username, password)
+		if err != nil {
+			return "", time.Now(), err
+		}
+		if s.indexer != nil {
+			if err := s.indexer.StoreSession(ctx, username, cookie); err != nil {
+				s.log.WarnContext(ctx, "GEI StoreSession failed", "error", err)
+			}
+		}
+		return cookie, expiry, nil
 	}
 }
 
-// refreshSession evicts the cached session for username and forces a fresh
-// login, returning the new cookie. Used to recover from a stale session.
+// refreshSession evicts the cached session for username (in-memory L1 + GEI L2)
+// and forces a fresh login, returning the new cookie. Used to recover from a
+// stale session.
 func (s *Server) refreshSession(ctx context.Context, username, password string) (string, error) {
 	s.tokenManager.Invalidate(username)
-	return s.tokenManager.GetToken(username, s.loginFunc(ctx, username, password))
+	if s.indexer != nil {
+		if err := s.indexer.DeleteSession(ctx, username); err != nil {
+			s.log.WarnContext(ctx, "GEI DeleteSession failed", "error", err)
+		}
+	}
+	return s.tokenManager.GetToken(username, s.sessionFunc(ctx, username, password))
 }

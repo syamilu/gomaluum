@@ -66,7 +66,7 @@ type Server struct {
 	log          *slog.Logger
 	paseto       *paseto.AppPaseto
 	grpc         *GRPCClient
-	indexer      *scheduleIndexer
+	indexer      *geiClient
 	httpClient   *http.Client
 	port         int
 	tokenManager *sf.TokenManager
@@ -127,9 +127,9 @@ func NewServer(port int, grpc *GRPCClient) *http.Server {
 
 	// Optional GEI schedule cache. When GEI_SERVICE_URL is unset (or unreachable)
 	// the indexer stays nil and handlers fall back to a full scrape every time.
-	var indexer *scheduleIndexer
+	var indexer *geiClient
 	if geiURL := os.Getenv("GEI_SERVICE_URL"); geiURL != "" {
-		idx, err := newScheduleIndexer(geiURL, os.Getenv("GEI_ADMIN_KEY"))
+		idx, err := newGEIClient(geiURL, os.Getenv("GEI_ADMIN_KEY"))
 		if err != nil {
 			log.Printf("Failed to connect to GEI, schedule cache disabled: %v", err)
 		} else {

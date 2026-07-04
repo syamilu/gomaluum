@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+// The proto package MUST match GEI's server (package `session`) so the gRPC
+// method paths line up (/session.SessionIndexer/...). The Go package is set
+// separately via go_package.
+package session;
+
+option go_package = "github.com/nrmnqdds/gomaluum/internal/proto/gei";
+
+// SessionIndexer persists a user's i-Ma'luum session cookie (MOD_AUTH_CAS),
+// encrypted at rest by GEI, so a live cookie is reused across requests and
+// restarts instead of re-logging-in every time.
+service SessionIndexer {
+  // Store a user's session cookie (encrypted). Admin-key guarded.
+  rpc StoreSession(StoreSessionRequest) returns (StoreSessionResponse);
+
+  // Retrieve a user's session cookie (decrypted).
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+
+  // Delete a user's session cookie (e.g. once it is stale). Admin-key guarded.
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+}
+
+message StoreSessionRequest {
+  string username = 1;
+  string cookie = 2;
+}
+
+message StoreSessionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetSessionRequest {
+  string username = 1;
+}
+
+message GetSessionResponse {
+  bool success = 1;
+  string cookie = 2;
+  string message = 3;
+}
+
+message DeleteSessionRequest {
+  string username = 1;
+}
+
+message DeleteSessionResponse {
+  bool success = 1;
+  string message = 2;
+}
