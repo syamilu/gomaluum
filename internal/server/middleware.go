@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/nrmnqdds/gomaluum/pkg/apikey"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type originCookie int
@@ -35,8 +37,25 @@ func (s *Server) PasetoAuthenticator() func(http.Handler) http.Handler {
 
 			authHeader := fullAuthHeader[7:]
 
+			// Attach the raw PASETO token to the request span so the exact token a
+			// consumer sent is visible in SigNoz — including on failed decodes below,
+			// which is the case we need to reproduce. NOTE: this exports a
+			// replayable credential to the tracing backend; keep the x-gomaluum-key
+			// header out of traces so the embedded IIUM password stays encrypted.
+			trace.SpanFromContext(r.Context()).SetAttributes(
+				attribute.String("auth.token", authHeader),
+			)
+
 			// Get API key from header
 			userAPIKey := r.Header.Get("x-gomaluum-key")
+
+			// Record only whether the consumer sent their own API key (never the
+			// key itself) so we can tell in SigNoz if a request fell back to the
+			// default key.
+			trace.SpanFromContext(r.Context()).SetAttributes(
+				attribute.Bool("auth.api_key_present", userAPIKey != ""),
+			)
+
 			if userAPIKey == "" {
 				userAPIKey = apikey.DefaultAPIKey
 			} else {
@@ -50,7 +69,7 @@ func (s *Server) PasetoAuthenticator() func(http.Handler) http.Handler {
 
 			token, err := s.DecodePasetoToken(r.Context(), authHeader, userAPIKey)
 			if err != nil {
-				logger.ErrorContext(r.Context(), "Failed to decode token", "error", err)
+				logger.ErrorContext(r.Context(), "Failed to decode token", "error", err, "token", authHeader)
 
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
