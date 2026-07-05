@@ -79,35 +79,26 @@ func (s *Server) GeneratePasetoToken(payload TokenPayload) (string, string, erro
 	return signed, imaluumCookie, nil
 }
 
-// DecodePasetoToken decodes the given PASETO token and returns the original uia cookie
+// DecodePasetoToken verifies the given PASETO token and re-authenticates using the
+// credentials it carries, returning a fresh i-Ma'luum session. The token's own
+// expiry is intentionally ignored — we always mint a fresh session from the
+// embedded credentials.
 func (s *Server) DecodePasetoToken(ctx context.Context, token, userAPIKey string) (*TokenPayload, error) {
-	parser := paseto.NewParserWithoutExpiryCheck() // Don't use NewParser() which will checks expiry by default
+	parser := paseto.NewParserWithoutExpiryCheck() // Don't use NewParser() which checks expiry by default
 	logger := s.log
 
-	// Don't throw an error immediately if the token has expired
-	// parser.AddRule(paseto.NotExpired())         // this will fail if the token has expired
 	parser.AddRule(paseto.IssuedBy("gomaluum")) // this will fail if the token was not issued by "gomaluum"
 
-	decodedToken, err := parser.ParseV4Public(*s.paseto.PublicKey, token, nil) // this will fail if parsing failes, cryptographic checks fail, or validation rules fail
+	decodedToken, err := parser.ParseV4Public(*s.paseto.PublicKey, token, nil) // this will fail if parsing fails, cryptographic checks fail, or validation rules fail
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to parse token", "error", err)
-
 		return nil, err
 	}
 
-	tokenExpiryDate, err := decodedToken.GetExpiration()
-	if err != nil {
-		logger.ErrorContext(ctx, "Failed to get expiration", "error", err)
-		return nil, err
-	}
-
-	today := time.Now()
-
-	// Get encrypted data from token
+	// Decrypt the credentials carried by the token using the API key.
 	encryptedUsername, _ := decodedToken.GetString("username")
 	encryptedPassword, _ := decodedToken.GetString("password")
 
-	// Decrypt data using API key
 	username, err := apikey.DecryptWithAPIKey(encryptedUsername, userAPIKey)
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to decrypt username with API key", "error", err)
@@ -120,58 +111,28 @@ func (s *Server) DecodePasetoToken(ctx context.Context, token, userAPIKey string
 		return nil, err
 	}
 
-	// if the token has expired, we need to regenerate it
-	if today.After(tokenExpiryDate) {
-		logger.DebugContext(ctx, "Token has expired")
-
-		// decode the password
-		decodedPassword, err := base64.StdEncoding.DecodeString(password)
-		if err != nil {
-			logger.ErrorContext(ctx, "Failed to decode password", "error", err)
-			return nil, err
-		}
-
-		refresh := s.sessionFunc(ctx, username, string(decodedPassword))
-
-		newToken, err := s.tokenManager.GetToken(username, refresh)
-		if err != nil {
-			logger.ErrorContext(ctx, "Failed to get token", "error", err)
-			return nil, err
-		}
-
-		logger.DebugContext(ctx, "Refreshed token", "username", username)
-
-		go s.UpdateAnalytics(username)
-
-		return &TokenPayload{
-			username:      username,
-			password:      string(decodedPassword),
-			imaluumCookie: newToken,
-			apiKey:        userAPIKey,
-		}, nil
-
-		// End of if token expired
-	}
-
-	// If token not expired yet - decrypt the cookie
-	encryptedCookie, _ := decodedToken.GetString("imaluumCookie")
-	imaluumCookie, err := apikey.DecryptWithAPIKey(encryptedCookie, userAPIKey)
-	if err != nil {
-		logger.ErrorContext(ctx, "Failed to decrypt cookie with API key", "error", err)
-		return nil, err
-	}
-
-	plainPassword, err := base64.StdEncoding.DecodeString(password)
+	decodedPassword, err := base64.StdEncoding.DecodeString(password)
 	if err != nil {
 		logger.ErrorContext(ctx, "Failed to decode password", "error", err)
 		return nil, err
 	}
 
+	refresh := s.sessionFunc(ctx, username, string(decodedPassword))
+
+	newToken, err := s.tokenManager.GetToken(username, refresh)
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to get token", "error", err)
+		return nil, err
+	}
+
+	logger.DebugContext(ctx, "Refreshed token", "username", username)
+
 	go s.UpdateAnalytics(username)
+
 	return &TokenPayload{
 		username:      username,
-		password:      string(plainPassword),
-		imaluumCookie: imaluumCookie,
+		password:      string(decodedPassword),
+		imaluumCookie: newToken,
 		apiKey:        userAPIKey,
 	}, nil
 }
