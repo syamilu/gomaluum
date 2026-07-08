@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/bytedance/sonic"
@@ -48,13 +49,15 @@ type imaluumProfileUser struct {
 }
 
 // mapImaluumProfile converts the raw SPA payload into the public Profile shape.
-// The payload's avatar URL is authoritative; when absent it falls back to the
-// smartcard URL derived from the matric number, matching the old scraper.
+// image_url must stay a real URL the app can load over the network. The SPA
+// embeds the avatar as a base64 data: URI, so only a genuine http(s) avatar is
+// used; otherwise (empty or data: URI) it falls back to the smartcard URL
+// derived from the matric number, matching the old scraper.
 func mapImaluumProfile(data *imaluumProfileData) *dtos.Profile {
 	u := data.User
 
 	imageURL := u.Avatar
-	if imageURL == "" {
+	if !strings.HasPrefix(imageURL, "http") {
 		imageURL = buildImageURL(u.MatricNo)
 	}
 
