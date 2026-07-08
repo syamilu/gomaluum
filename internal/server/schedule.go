@@ -4,24 +4,17 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"regexp"
-	"slices"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/bytedance/sonic"
-	"github.com/gocolly/colly/v2"
 	"github.com/lucsky/cuid"
 	"github.com/nrmnqdds/gomaluum/internal/constants"
 	"github.com/nrmnqdds/gomaluum/internal/dtos"
 	"github.com/nrmnqdds/gomaluum/internal/errors"
 	"github.com/nrmnqdds/gomaluum/pkg/utils"
-	"github.com/rung/go-safecast"
 
 	_ "time/tzdata"
 )
@@ -37,28 +30,6 @@ var dayMap = map[string][]string{
 	"TWTH":   {"T", "W", "TH"},
 	"MTWTH":  {"M", "T", "W", "TH"},
 	"MTWTHF": {"M", "T", "W", "TH", "F"},
-}
-
-// Pre-compiled regex for time parsing
-var timePattern = regexp.MustCompile(`^\d{3,4}-\d{3,4}$`)
-
-// Object pools for memory reuse
-var subjectPool = sync.Pool{
-	New: func() any {
-		return &dtos.ScheduleSubject{}
-	},
-}
-
-var weekTimeSlicePool = sync.Pool{
-	New: func() any {
-		return make([]dtos.WeekTime, 0, 5)
-	},
-}
-
-var stringSlicePool = sync.Pool{
-	New: func() any {
-		return make([]string, 0, 10)
-	},
 }
 
 // Worker pool structures
@@ -108,177 +79,33 @@ func normalizeTime(timeStr string) (string, *int64) {
 	return trimmed, &unixTimestamp
 }
 
-// Parse table row with object pooling
-func parseTableRow(tds []string, subjects *[]dtos.ScheduleSubject, mu *sync.Mutex) {
-	if len(tds) == 0 {
-		return
-	}
-
-	weekTimeSlice := weekTimeSlicePool.Get().([]dtos.WeekTime)
-	weekTimeSlice = weekTimeSlice[:0] // Reset slice
-
-	var subject *dtos.ScheduleSubject
-
-	// Handle perfect cell (9 columns)
-	if len(tds) == 9 {
-		subject = subjectPool.Get().(*dtos.ScheduleSubject)
-		*subject = dtos.ScheduleSubject{} // Reset
-
-		subject.CourseCode = strings.TrimSpace(tds[0])
-		subject.CourseName = strings.TrimSpace(tds[1])
-
-		section, err := safecast.Atoi32(strings.TrimSpace(tds[2]))
-		if err != nil {
-			subjectPool.Put(subject)
-			weekTimeSlicePool.Put(weekTimeSlice)
-			return
-		}
-		subject.Section = uint32(section)
-
-		chr, err := strconv.ParseFloat(strings.TrimSpace(tds[3]), 32)
-		if err != nil {
-			subjectPool.Put(subject)
-			weekTimeSlicePool.Put(weekTimeSlice)
-			return
-		}
-		subject.Chr = chr
-
-		// Parse days and times
-		days := parseDays(strings.TrimSpace(tds[5]))
-		timeFullForm := strings.ReplaceAll(strings.TrimSpace(tds[6]), " ", "")
-
-		if timeFullForm != constants.TimeSeparator && timePattern.MatchString(timeFullForm) {
-			timeParts := strings.Split(timeFullForm, constants.TimeSeparator)
-			if len(timeParts) == 2 {
-				start, startUnix := normalizeTime(timeParts[0])
-				end, endUnix := normalizeTime(timeParts[1])
-
-				for _, day := range days {
-					dayNum := utils.GetScheduleDays(day)
-					weekTimeSlice = append(weekTimeSlice, dtos.WeekTime{
-						Start:     start,
-						StartUnix: *startUnix,
-						End:       end,
-						EndUnix:   *endUnix,
-						Day:       dayNum,
-					})
-				}
-			}
-		}
-
-		subject.Venue = strings.TrimSpace(tds[7])
-		subject.Lecturer = strings.TrimSpace(tds[8])
-	}
-
-	// Handle merged cell (4 columns)
-	if len(tds) == 4 {
-		mu.Lock()
-		if len(*subjects) == 0 {
-			mu.Unlock()
-			weekTimeSlicePool.Put(weekTimeSlice)
-			return
-		}
-		lastSubject := (*subjects)[len(*subjects)-1]
-		mu.Unlock()
-
-		subject = subjectPool.Get().(*dtos.ScheduleSubject)
-		*subject = dtos.ScheduleSubject{} // Reset
-
-		subject.CourseCode = lastSubject.CourseCode
-		subject.CourseName = lastSubject.CourseName
-		subject.Section = lastSubject.Section
-		subject.Chr = lastSubject.Chr
-
-		// Parse days and times
-		days := parseDays(strings.TrimSpace(tds[0]))
-		timeFullForm := strings.ReplaceAll(strings.TrimSpace(tds[1]), " ", "")
-
-		if timePattern.MatchString(timeFullForm) {
-			timeParts := strings.Split(timeFullForm, "-")
-			if len(timeParts) == 2 {
-				start, startUnix := normalizeTime(timeParts[0])
-				end, endUnix := normalizeTime(timeParts[1])
-
-				for _, day := range days {
-					dayNum := utils.GetScheduleDays(day)
-					weekTimeSlice = append(weekTimeSlice, dtos.WeekTime{
-						Start:     start,
-						StartUnix: *startUnix,
-						End:       end,
-						EndUnix:   *endUnix,
-						Day:       dayNum,
-					})
-				}
-			}
-		}
-
-		subject.Venue = strings.TrimSpace(tds[2])
-		subject.Lecturer = strings.TrimSpace(tds[3])
-	}
-
-	if subject != nil {
-		// Copy weekTime slice to avoid pool contamination
-		subject.Timestamps = make([]dtos.WeekTime, len(weekTimeSlice))
-		copy(subject.Timestamps, weekTimeSlice)
-		subject.ID = fmt.Sprintf("gomaluum:subject:%s", cuid.Slug())
-
-		mu.Lock()
-		*subjects = append(*subjects, *subject)
-		mu.Unlock()
-
-		subjectPool.Put(subject)
-	}
-
-	weekTimeSlicePool.Put(weekTimeSlice)
-}
-
-// Worker function for processing schedule sessions
+// Worker function for processing schedule sessions. Each job fetches one
+// session's data through the i-Ma'luum schedule SPA endpoint (see schedule_spa.go)
+// and maps it into a ScheduleResponse. A stale session yields nil data; the
+// worker emits an empty response and the handler retries after re-login.
 func (s *Server) scheduleWorker(ctx context.Context, jobs <-chan scheduleJob, results chan<- scheduleResult, cookie string, stale *atomic.Bool) {
 	for job := range jobs {
 		func() {
 			defer utils.CatchPanic("schedule worker")
 
-			c := s.newImaluumCollector(ctx, cookie, stale)
-
-			mu := sync.Mutex{}
-			subjects := []dtos.ScheduleSubject{}
-
-			c.OnHTML("table.table-hover tbody tr", func(e *colly.HTMLElement) {
-				// Get all text at once with efficient DOM traversal
-				cells := e.DOM.Find("td")
-				if cells.Length() == 0 {
-					return
-				}
-
-				tds := stringSlicePool.Get().([]string)
-				tds = tds[:0] // Reset slice
-
-				cells.Each(func(_ int, s *goquery.Selection) {
-					tds = append(tds, s.Text())
-				})
-
-				parseTableRow(tds, &subjects, &mu)
-				stringSlicePool.Put(tds)
-			})
-
-			url := constants.ImaluumSchedulePage + job.query
-			if err := c.Visit(url); err != nil {
-				results <- scheduleResult{
-					err: classifyVisitError(err),
-				}
+			data, err := s.fetchScheduleData(ctx, cookie, job.query, stale)
+			if err != nil {
+				results <- scheduleResult{err: err}
 				return
 			}
 
-			response := dtos.ScheduleResponse{
-				ID:           fmt.Sprintf("gomaluum:schedule:%s", cuid.Slug()),
-				SessionName:  job.name,
-				SessionQuery: job.query,
-				Schedule:     subjects,
+			subjects := []dtos.ScheduleSubject{}
+			if data != nil {
+				subjects = mapImaluumSchedule(data)
 			}
 
 			results <- scheduleResult{
-				schedule: response,
-				err:      nil,
+				schedule: dtos.ScheduleResponse{
+					ID:           fmt.Sprintf("gomaluum:schedule:%s", cuid.Slug()),
+					SessionName:  job.name,
+					SessionQuery: job.query,
+					Schedule:     subjects,
+				},
 			}
 		}()
 	}
@@ -423,11 +250,9 @@ func (s *Server) ScheduleHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	var (
-		logger         = s.log
-		cookie         = r.Context().Value(ctxToken).(string)
-		sessionQueries []string
-		sessionNames   []string
-		schedules      []dtos.ScheduleResponse
+		logger    = s.log
+		cookie    = r.Context().Value(ctxToken).(string)
+		schedules []dtos.ScheduleResponse
 	)
 
 	// username keys the GEI schedule cache; ?refresh=1 (or ?refresh=true) forces
@@ -640,33 +465,23 @@ func (s *Server) ScheduleHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.scrapeWithRetry(r.Context(), func(cookie string) (bool, error) {
 		var stale atomic.Bool
-		sessionQueries = sessionQueries[:0]
-		sessionNames = sessionNames[:0]
 
-		c := s.newImaluumCollector(r.Context(), cookie, &stale)
-		c.OnHTML(".box.box-primary .box-header.with-border .dropdown ul.dropdown-menu", func(e *colly.HTMLElement) {
-			hrefs := e.ChildAttrs("li[style*='font-size:16px'] a", "href")
-			sessionQueries = make([]string, len(hrefs))
-			for i, href := range hrefs {
-				sessionQueries[i] = sessionQueryFromHref(href)
-			}
-			sessionNames = e.ChildTexts("li[style*='font-size:16px'] a")
-		})
-		if err := c.Visit(constants.ImaluumSchedulePage); err != nil {
-			return false, classifyVisitError(err)
+		// Discover the available sessions from the schedule SPA's data payload: a
+		// default page load returns the full session list in all_sem. (i-Ma'luum
+		// moved this from a server-rendered dropdown to a JS-populated one.)
+		data, err := s.fetchScheduleData(r.Context(), cookie, "", &stale)
+		if err != nil {
+			return false, err
 		}
 		if stale.Load() {
 			return true, nil
 		}
-
-		filteredQueries := make([]string, 0, len(sessionQueries))
-		filteredNames := make([]string, 0, len(sessionNames))
-		for i := range sessionQueries {
-			if !slices.Contains(UnwantedSessionQueries[:], sessionQueries[i]) {
-				filteredQueries = append(filteredQueries, sessionQueries[i])
-				filteredNames = append(filteredNames, sessionNames[i])
-			}
+		if data == nil {
+			logger.ErrorContext(r.Context(), "No valid sessions found")
+			return false, errors.ErrScheduleIsEmpty
 		}
+
+		filteredQueries, filteredNames := sessionsFromAllSem(data.AllSem)
 		if len(filteredQueries) == 0 {
 			logger.ErrorContext(r.Context(), "No valid sessions found")
 			return false, errors.ErrScheduleIsEmpty
