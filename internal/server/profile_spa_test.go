@@ -47,6 +47,22 @@ func TestMapImaluumProfile(t *testing.T) {
 		})
 		require.Equal(t, buildImageURL("2214227"), p.ImageURL)
 	})
+
+	t.Run("falls back to the smartcard URL when avatar is a base64 data URI", func(t *testing.T) {
+		// i-Ma'luum's SPA embeds the avatar as a data: URI. image_url must stay a
+		// real URL (the app loads it over the network), so fall back to smartcard.
+		p := mapImaluumProfile(&imaluumProfileData{
+			User: imaluumProfileUser{MatricNo: "2214227", Avatar: "data:image/jpeg;base64,/9j/4AAQSkZ"},
+		})
+		require.Equal(t, buildImageURL("2214227"), p.ImageURL)
+	})
+
+	t.Run("keeps a real http avatar URL when the payload provides one", func(t *testing.T) {
+		p := mapImaluumProfile(&imaluumProfileData{
+			User: imaluumProfileUser{MatricNo: "2214227", Avatar: "https://cdn.iium.edu.my/a.jpg"},
+		})
+		require.Equal(t, "https://cdn.iium.edu.my/a.jpg", p.ImageURL)
+	})
 }
 
 // Guard: the raw DTO must decode the real /Profile data JSON shape (BOM-stripped),
