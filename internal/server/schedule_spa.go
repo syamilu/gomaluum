@@ -128,19 +128,20 @@ func mapImaluumSchedule(data *imaluumScheduleData) []dtos.ScheduleSubject {
 
 			start, startUnix := normalizeTime(slot.Start)
 			end, endUnix := normalizeTime(slot.Ends)
+			// Skip slots with no parseable time (e.g. block courses with a blank
+			// time). The DTO omits zero unix values via omitempty, and consumers
+			// require start_unix/end_unix — so a timeless slot must not be emitted.
+			if startUnix == nil || endUnix == nil {
+				continue
+			}
 			for _, day := range parseDays(strings.TrimSpace(slot.Day)) {
-				wt := dtos.WeekTime{
-					Start: start,
-					End:   end,
-					Day:   utils.GetScheduleDays(day),
-				}
-				if startUnix != nil {
-					wt.StartUnix = *startUnix
-				}
-				if endUnix != nil {
-					wt.EndUnix = *endUnix
-				}
-				timestamps = append(timestamps, wt)
+				timestamps = append(timestamps, dtos.WeekTime{
+					Start:     start,
+					StartUnix: *startUnix,
+					End:       end,
+					EndUnix:   *endUnix,
+					Day:       utils.GetScheduleDays(day),
+				})
 			}
 		}
 		subject.Timestamps = timestamps
